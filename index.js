@@ -1,155 +1,88 @@
 const express = require('express');
-const multer = require('multer');
+const axios = require('axios');
+const FormData = require('form-data');
 const { createClient } = require('@deepgram/sdk');
-const ffmpeg = require('fluent-ffmpeg');
-const fs = require('fs');
-const { v4: uuidv4 } = require('uuid');
 require('dotenv').config();
+const fs = require('fs');
+const path = require('path');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 
 const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
-const storage = multer.memoryStorage(); 
-const upload = multer({ storage });
 
-app.use(express.json()); 
+// Middleware to parse JSON with an increased size limit
+app.use(express.json({ limit: '1000mb' }));
 
-app.post('/upload', upload.single('video'), async (req, res) => {
-  if (!req.file) {
-    return res.status(400).send('No file uploaded');
-  }
-
-  try {
-    const fileBuffer = req.file.buffer;
-    const result = await deepgram.transcription.preRecorded({
-      buffer: fileBuffer,
-      mimetype: 'audio/mp4', 
-    }, {
-      punctuate: true,
-      utterances: true,
-      language: "en-US", 
-    });
-
-    const transcription = result.results.utterances;
-    res.json({ transcription });
-
-  } catch (error) {
-    console.error('Error transcribing audio:', error);
-    res.status(500).send('Transcription failed');
-  }
+// Middleware to log incoming requests
+app.use((req, res, next) => {
+  console.log('Incoming Request');
+  console.log('Method:', req.method);
+  console.log('URL:', req.url);
+  console.log('Headers:', req.headers);
+  console.log('Body:', req.body);
+  next();
 });
 
 
-app.post('/update-captions', async (req, res) => {
-    const { videoUri, captions } = req.body;
-  
-    if (!videoUri || !captions) {
-      return res.status(400).send('Video URI and captions are required');
-    }
-  
-    try {
-      // Fetch video from the URI
-      const videoResponse = await axios.get(videoUri, { responseType: 'arraybuffer' });
-      const videoBuffer = Buffer.from(videoResponse.data);
-  
-      // Create a temporary file for the video
-      const videoPath = path.join(__dirname, 'temp', 'video.mp4');
-      await fs.outputFile(videoPath, videoBuffer);
-  
-      // Create a temporary file for the captions
-      const captionsPath = path.join(__dirname, 'temp', 'captions.srt');
-      await fs.outputFile(captionsPath, captions.join('\n'));
-  
-      // Generate output file path
-      const outputPath = path.join(__dirname, 'temp', 'output.mp4');
-  
-      // Burn captions into video using FFmpeg
-      ffmpeg(videoPath)
-        .input(captionsPath)
-        .inputOptions(['-c:s srt'])
-        .outputOptions(['-c:v libx264', '-c:a aac', '-strict experimental'])
-        .output(outputPath)
-        .on('end', () => {
-          res.sendFile(outputPath);
-        })
-        .on('error', (err) => {
-          console.error('Error processing video:', err);
-          res.status(500).send('Video processing failed');
-        })
-        .run();
-    } catch (error) {
-      console.error('Error updating captions:', error);
-      res.status(500).send('Caption update failed');
-    }
-  });
-  
+const transcribeUrl = async (url) => {
+  // STEP 1: Create a Deepgram client using the API key
+  const deepgram = createClient(process.env.DEEPGRAM_API_KEY);
 
-  
-app.post('/adjust-captions', upload.single('video'), async (req, res) => {
-  if (!req.file || !req.body.captions) {
-    return res.status(400).send('Missing video or captions');
-  }
-
-  try {
-    const videoBuffer = req.file.buffer;
-    const captions = req.body.captions;
-    
-    const videoPath = `./uploads/${uuidv4()}.mp4`;
-    const captionsPath = `./uploads/${uuidv4()}.srt`; // .srt format for captions
-
-    fs.writeFileSync(videoPath, videoBuffer);
-
-    // Convert captions JSON to .srt format
-    const srtCaptions = convertToSRT(captions);
-    fs.writeFileSync(captionsPath, srtCaptions);
-
-    // Step 3: Burn captions into video using ffmpeg
-    const outputVideoPath = `./uploads/output-${uuidv4()}.mp4`;
-
-    ffmpeg(videoPath)
-      .input(captionsPath)
-      .outputOptions('-c:v libx264', '-crf 23', '-preset medium', '-vf subtitles=' + captionsPath)
-      .save(outputVideoPath)
-      .on('end', () => {
-        // Step 4: Send the processed video file or upload link
-        res.download(outputVideoPath, (err) => {
-          if (err) console.error('Error sending file:', err);
-          // Cleanup temp files
-          fs.unlinkSync(videoPath);
-          fs.unlinkSync(captionsPath);
-          fs.unlinkSync(outputVideoPath);
-        });
-      })
-      .on('error', (err) => {
-        console.error('Error processing video:', err);
-        res.status(500).send('Failed to process video with captions');
-      });
-
-  } catch (error) {
-    console.error('Error processing adjusted captions:', error);
-    res.status(500).send('Failed to bind captions to video');
-  }
-});
-
-// Convert JSON captions to .srt format
-const convertToSRT = (captions) => {
-  return captions.map((caption, index) => {
-    const start = formatTime(caption.start);
-    const end = formatTime(caption.end);
-    return `${index + 1}\n${start} --> ${end}\n${caption.text}\n`;
-  }).join('\n');
-};
-
+  // STEP 2: Call the transcribeUrl method with the audio payload and options
+  const { result, error } = await deepgram.listen.prerecorded.transcribeUrl(
+    {
+      url: url,
+    },
  
-const formatTime = (timeInMs) => {
-  const date = new Date(timeInMs);
-  const hours = String(date.getUTCHours()).padStart(2, '0');
-  const minutes = String(date.getUTCMinutes()).padStart(2, '0');
-  const seconds = String(date.getUTCSeconds()).padStart(2, '0');
-  const milliseconds = String(date.getUTCMilliseconds()).padStart(3, '0');
-  return `${hours}:${minutes}:${seconds},${milliseconds}`;
+    {
+      model: "nova-2",
+      smart_format: true,
+    }
+  );
+
+  if (error) throw error;
+ 
+  if (!error) console.dir(result, { depth: null });
+  return result
 };
+
+app.post('/upload', async (req, res) => {
+  console.log('hit');
+  const { video } = req.body;
+  console.log("Called with video data:", video);
+
+  if (!video) {
+    return res.status(400).send('No video data provided');
+  }
+
+  try {
+    // Prepare the data for Cloudinary
+    const formData = new FormData();
+    formData.append('file', video);
+    formData.append('upload_preset', 'qmakq1p3'); // Replace with your Cloudinary upload preset
+
+    // Upload to Cloudinary
+    const cloudinaryResponse = await axios.post(
+      'https://api.cloudinary.com/v1_1/dojwag3u1/video/upload',
+      formData,
+      {
+        headers: {
+          ...formData.getHeaders(),
+        },
+      }
+    );
+
+    const videoUrl = cloudinaryResponse.data.secure_url;
+    console.log("Cloudinary URL:", videoUrl);
+   const result = await transcribeUrl(videoUrl)
+ 
+    res.status(200).json({ result });
+  } catch (error) {
+    console.error('Error processing video:', error);
+    res.status(500).send('Processing failed');
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
